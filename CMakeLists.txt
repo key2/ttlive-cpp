@@ -118,6 +118,7 @@ add_library(ttlive STATIC
   ${TTLIVE_PROTO_OUT}/tiktok.pb.cc
   src/qjs_signer.cpp
   src/http_client.cpp
+  src/ws_client.cpp
   src/web_defaults.cpp
   src/client.cpp
   src/event_parser.cpp

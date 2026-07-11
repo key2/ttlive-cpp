@@ -24,6 +24,7 @@ int main(int argc, char** argv) {
                      "  --cookies \"k=v;..\" Seed cookies (e.g. ttwid/msToken/sessionid)\n"
                      "  --js-dir <path>    Directory with TikTok SDK JS files\n"
                      "  --gifts            Fetch and print the room gift list on connect\n"
+                     "  --no-ws            Use HTTP long-polling instead of WebSocket\n"
                      "Example: %s @msk.0011\n",
                      argv[0], argv[0]);
         return 2;
@@ -43,6 +44,8 @@ int main(int argc, char** argv) {
             opts.js_dir = argv[++i];
         } else if (a == "--gifts") {
             opts.fetch_gift_list = true;
+        } else if (a == "--no-ws") {
+            opts.use_websocket = false;
         }
     }
 

@@ -23,6 +23,9 @@ inline constexpr const char* kUserAgent =
 /// Default query params sent with every Webcast REST request.
 ParamList base_web_params();
 
+/// Default query params for the webcast WebSocket connect URL.
+ParamList base_ws_params();
+
 /// Serialize a param list to ``k=v&k=v`` (no leading '?').
 std::string encode_query(const ParamList& params);
 

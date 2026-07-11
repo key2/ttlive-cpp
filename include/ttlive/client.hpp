@@ -10,6 +10,10 @@ namespace ttlive {
 
 /// Options controlling how the client connects.
 struct ClientOptions {
+    /// Use the real-time WebSocket transport (low latency). Falls back to HTTP
+    /// long-polling automatically if the WS handshake fails.
+    bool use_websocket = true;
+
     /// Whether to check the user is live before connecting (recommended).
     bool fetch_live_check = true;
 

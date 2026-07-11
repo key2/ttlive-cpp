@@ -46,8 +46,14 @@ provide, and this project solves both:
    (Optionally `GET /webcast/gift/list/` for the room's gift catalog.)
 5. `GET /webcast/im/fetch/` (signed) → an initial batch of messages + a
    `cursor` / `internal_ext`.
-6. **HTTP long-poll**: re-fetch with the latest cursor at the server-provided
-   `fetch_interval`, decoding each protobuf message into an `Event`.
+6. **Real-time transport (default): WebSocket.** Open the webcast push socket
+   `wss://webcast-ws.<region>.tiktok.com/webcast/im/ws_proxy/ws_reuse_supplement/?<params>&X-Bogus=...`
+   — the URL is built client-side (region from the `tt-target-idc` cookie),
+   signed by QuickJS, and connected with the Chrome fingerprint. Then send an
+   `im_enter_room` frame, heartbeat every ~10 s, and decode each pushed
+   `WebcastPushFrame` (gzip-aware) into events.
+7. **Fallback: HTTP long-poll.** If the WS handshake fails, re-fetch
+   `/webcast/im/fetch/` with the rolling cursor at the server's `fetch_interval`.
 
 ---
 
@@ -61,6 +67,7 @@ src/
   client.cpp          Orchestration: warmup -> room id -> live check -> poll
   qjs_signer.*        QuickJS + webmssdk.js signer (X-Bogus / X-Gnarly)
   http_client.*       curl-impersonate HTTPS client (Chrome fingerprint, cookies)
+  ws_client.*         curl-impersonate WebSocket client (real-time push)
   event_parser.*      Webcast protobuf message -> public Event
   web_defaults.*      Default query params + URL query encoder
 js/                   TikTok's SDK JS (webmssdk.js, hybrid-fake-dom.js, ...)
@@ -128,6 +135,7 @@ ttlive_demo <@username | username> [options]
   --cookies "k=v;..."  Seed cookies (e.g. a logged-in ttwid / sessionid)
   --js-dir <path>      Directory holding the TikTok SDK JS files
   --gifts              Fetch and print the room gift list on connect
+  --no-ws              Use HTTP long-polling instead of the WebSocket
 ```
 
 Examples:
@@ -253,6 +261,7 @@ You can join this with `GiftEvent`s: `Event::gift_id` matches `GiftInfo::id`.
 
 ```cpp
 struct ClientOptions {
+    bool use_websocket = true;         // WebSocket (low latency); false = poll
     bool fetch_live_check = true;      // check is-live before connecting
     bool fetch_stream_info = true;     // fetch FLV/RTMP URLs on connect
     bool fetch_gift_list = false;      // fetch the gift catalog on connect (large)

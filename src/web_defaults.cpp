@@ -33,6 +33,32 @@ ParamList base_web_params() {
     };
 }
 
+// Params for the webcast push WebSocket, matching the browser (golive2 HAR).
+// room_id / compress / cursor / internal_ext / X-Bogus are added by the client.
+ParamList base_ws_params() {
+    return {
+        {"version_code", "270000"},
+        {"device_platform", "web"},
+        {"cookie_enabled", "true"},
+        {"app_name", "tiktok_web"},
+        {"aid", "1988"},
+        {"live_id", "12"},
+        {"identity", "audience"},
+        {"sup_ws_ds_opt", "1"},
+        {"ws_direct", "1"},
+        {"resp_content_type", "protobuf"},
+        {"did_rule", "3"},
+        {"heartbeat_duration", "10000"},
+        {"last_rtt", "0"},
+        {"app_language", "en"},
+        {"webcast_language", "en"},
+        {"client_enter", "1"},
+        {"update_version_code", "2.0.0"},
+        {"browser_name", "Mozilla"},
+        {"browser_online", "true"},
+    };
+}
+
 static void append_encoded(std::string& out, const std::string& s) {
     // Percent-encode anything that isn't an RFC3986 unreserved char. TikTok
     // query values (esp. browser_version / user_agent) contain spaces, parens

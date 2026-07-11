@@ -11,12 +11,14 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <zlib.h>
 
 #include "event_parser.hpp"
 #include "http_client.hpp"
 #include "qjs_signer.hpp"
 #include "tiktok.pb.h"
 #include "web_defaults.hpp"
+#include "ws_client.hpp"
 
 namespace ttlive {
 
@@ -54,6 +56,37 @@ std::string clean_unique_id(std::string id) {
     while (!id.empty() && std::isspace((unsigned char)id.front())) id.erase(id.begin());
     while (!id.empty() && std::isspace((unsigned char)id.back())) id.pop_back();
     return id;
+}
+
+std::string bytes_to_string(const std::vector<uint8_t>& p) {
+    return std::string(reinterpret_cast<const char*>(p.data()), p.size());
+}
+std::vector<uint8_t> string_to_bytes(const std::string& s) {
+    return std::vector<uint8_t>(s.begin(), s.end());
+}
+
+// gzip-decompress (auto-detect header). Returns input on failure.
+std::string gunzip(const std::string& in) {
+    if (in.empty()) return in;
+    z_stream zs{};
+    if (inflateInit2(&zs, 15 + 32) != Z_OK) return in;
+    zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(in.data()));
+    zs.avail_in = static_cast<uInt>(in.size());
+    std::string out;
+    char buf[16384];
+    int ret;
+    do {
+        zs.next_out = reinterpret_cast<Bytef*>(buf);
+        zs.avail_out = sizeof(buf);
+        ret = inflate(&zs, Z_NO_FLUSH);
+        if (ret != Z_OK && ret != Z_STREAM_END && ret != Z_BUF_ERROR) {
+            inflateEnd(&zs);
+            return in;
+        }
+        out.append(buf, sizeof(buf) - zs.avail_out);
+    } while (ret != Z_STREAM_END && zs.avail_in > 0);
+    inflateEnd(&zs);
+    return out;
 }
 
 // Unescape a JSON string body (handles \/, \uXXXX for ASCII, \n, \t, \", \\).
@@ -153,6 +186,8 @@ struct TikTokLiveClient::Impl {
 
     HttpClient http;
     std::unique_ptr<QuickJsSigner> signer;
+    WsClient ws;
+    int64_t hb_seq = 1;
 
     std::map<EventType, std::vector<EventCallback>> handlers;
     std::vector<EventCallback> any_handlers;
@@ -413,14 +448,150 @@ struct TikTokLiveClient::Impl {
     }
 
     // Turn a ProtoMessageFetchResult into events.
-    void process_fetch_result(const tiktok::ProtoMessageFetchResult& result) {
+    bool process_fetch_result(const tiktok::ProtoMessageFetchResult& result) {
+        bool live_ended = false;
         for (const auto& msg : result.messages()) {
             Event ev;
             const std::string& method = msg.method();
             std::vector<uint8_t> payload(msg.payload().begin(), msg.payload().end());
             parse_event(method, payload, ev);
             emit(ev);
+            if (ev.type == EventType::LiveEnd) live_ended = true;
         }
+        return live_ended;
+    }
+
+    // ---- WebSocket transport ---------------------------------------------
+
+    // Map the tt-target-idc cookie to a webcast-ws region host.
+    std::string ws_host() const {
+        std::string idc = http.cookie("tt-target-idc");
+        // Observed hosts: webcast-ws.eu.tiktok.com (eu-*), webcast-ws.us.tiktok.com.
+        if (idc.rfind("eu", 0) == 0) return "webcast-ws.eu.tiktok.com";
+        if (idc.rfind("sg", 0) == 0 || idc.rfind("alisg", 0) == 0)
+            return "webcast-ws.sg.tiktok.com";
+        return "webcast-ws.us.tiktok.com";
+    }
+
+    // Build + sign the webcast WS URL (returns wss://...).
+    std::string build_ws_url(const std::string& cursor, const std::string& internal_ext) {
+        ParamList params = web_defaults::base_ws_params();
+        params.push_back({"room_id", std::to_string(room_id)});
+        params.push_back({"compress", "gzip"});
+        if (!cursor.empty()) params.push_back({"cursor", cursor});
+        if (!internal_ext.empty()) params.push_back({"internal_ext", internal_ext});
+
+        std::string base = "https://" + ws_host() +
+                           "/webcast/im/ws_proxy/ws_reuse_supplement/?" +
+                           web_defaults::encode_query(params);
+        signer->set_cookies(http.cookie_header());
+        std::string signed_url = signer->sign(base);
+        // Switch scheme to wss for the WebSocket connect.
+        if (signed_url.rfind("https://", 0) == 0)
+            signed_url = "wss://" + signed_url.substr(8);
+        return signed_url;
+    }
+
+    std::vector<uint8_t> make_push_frame(const std::string& payload_type,
+                                         const std::vector<uint8_t>& payload,
+                                         int64_t log_id = 0) {
+        tiktok::WebcastPushFrame frame;
+        if (log_id) frame.set_log_id(log_id);
+        frame.set_payload_type(payload_type);
+        frame.set_payload_encoding("pb");
+        frame.set_payload(bytes_to_string(payload));
+        std::string out;
+        frame.SerializeToString(&out);
+        return string_to_bytes(out);
+    }
+
+    void ws_send_enter_room() {
+        tiktok::WebcastImEnterRoomMessage msg;
+        msg.set_room_id(room_id);
+        msg.set_identity("audience");
+        msg.set_cursor("");
+        std::string body;
+        msg.SerializeToString(&body);
+        ws.send_binary(make_push_frame("im_enter_room", string_to_bytes(body)));
+    }
+
+    void ws_send_heartbeat() {
+        tiktok::HeartBeatMessage hb;
+        hb.set_room_id(room_id);
+        hb.set_send_packet_seq_id(hb_seq++);
+        std::string body;
+        hb.SerializeToString(&body);
+        ws.send_binary(make_push_frame("hb", string_to_bytes(body)));
+    }
+
+    void ws_send_ack(int64_t log_id, const std::string& internal_ext) {
+        std::string payload = internal_ext.empty() ? "-" : internal_ext;
+        ws.send_binary(make_push_frame("ack", string_to_bytes(payload), log_id));
+    }
+
+    // Decode an incoming WebcastPushFrame; if it's a "msg" frame, unwrap the
+    // (optionally gzipped) ProtoMessageFetchResult and dispatch its events.
+    // Returns true if the live ended.
+    bool ws_handle_frame(const std::vector<uint8_t>& raw) {
+        tiktok::WebcastPushFrame frame;
+        if (!frame.ParseFromArray(raw.data(), static_cast<int>(raw.size()))) return false;
+        if (frame.payload_type() != "msg") return false;
+
+        std::string payload = frame.payload();
+        for (const auto& h : frame.headers()) {
+            if (h.key() == "compress_type" && h.value() == "gzip") {
+                payload = gunzip(payload);
+                break;
+            }
+        }
+        // Auto-detect gzip even without the header.
+        if (payload.size() > 2 && (unsigned char)payload[0] == 0x1f &&
+            (unsigned char)payload[1] == 0x8b) {
+            payload = gunzip(payload);
+        }
+
+        tiktok::ProtoMessageFetchResult result;
+        if (!result.ParseFromString(payload)) return false;
+
+        if (result.need_ack()) ws_send_ack(frame.log_id(), result.internal_ext());
+        return process_fetch_result(result);
+    }
+
+    // Run the WebSocket event stream. Returns true if it ran (connected);
+    // false if the handshake failed (caller should fall back to polling).
+    bool run_websocket(const tiktok::ProtoMessageFetchResult& initial) {
+        std::string url;
+        try {
+            url = build_ws_url(initial.cursor(), initial.internal_ext());
+            ws.connect(url, http.cookie_header(), http.user_agent());
+        } catch (const std::exception&) {
+            return false;
+        }
+
+        ws_send_enter_room();
+
+        auto last_hb = std::chrono::steady_clock::now();
+        const auto hb_interval = std::chrono::seconds(10);
+
+        while (running.load() && !stop_requested.load() && ws.connected()) {
+            std::vector<uint8_t> msg;
+            WsClient::RecvStatus st = ws.recv_binary(msg);
+            if (st == WsClient::RecvStatus::Message) {
+                if (ws_handle_frame(msg)) break;  // live ended
+            } else if (st == WsClient::RecvStatus::Again) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            } else {
+                break;  // Closed or Error
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_hb >= hb_interval) {
+                ws_send_heartbeat();
+                last_hb = now;
+            }
+        }
+        ws.close();
+        return true;
     }
 
     void run() {
@@ -491,16 +662,33 @@ struct TikTokLiveClient::Impl {
             process_fetch_result(initial);
         }
 
-        // 6) HTTP long-poll loop. TikTok Web serves the live event stream by
-        //    repeated /im/fetch/ calls carrying the previous cursor +
-        //    internal_ext; fetch_interval (ms) paces the polling.
+        // 6) Real-time transport: WebSocket first (low latency), falling back
+        //    to HTTP long-polling if the WS handshake fails.
+        bool ws_ran = false;
+        if (options.use_websocket) {
+            ws_ran = run_websocket(initial);
+        }
+        if (!ws_ran) {
+            poll_loop(initial);
+        }
+
+        // 7) Teardown.
+        running.store(false);
+
+        Event ev;
+        ev.type = EventType::Disconnect;
+        ev.method = "Disconnect";
+        emit(ev);
+    }
+
+    // HTTP long-poll loop (fallback). Re-fetches with the rolling cursor at the
+    // server-provided fetch_interval.
+    void poll_loop(const tiktok::ProtoMessageFetchResult& initial) {
         std::string cursor = initial.cursor();
         std::string internal_ext = initial.internal_ext();
         int64_t interval_ms = initial.fetch_interval() > 0 ? initial.fetch_interval() : 1000;
-        bool disconnected_by_control = false;
 
         while (running.load() && !stop_requested.load()) {
-            // Sleep the requested interval (broken into slices so stop() is snappy).
             for (int64_t slept = 0; slept < interval_ms && running.load() && !stop_requested.load();
                  slept += 100) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(
@@ -512,33 +700,18 @@ struct TikTokLiveClient::Impl {
             try {
                 batch = fetch_once(cursor, internal_ext);
             } catch (const std::exception&) {
-                // transient error; back off briefly and retry
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 continue;
             }
 
-            for (const auto& msg : batch.messages()) {
-                Event ev;
-                std::vector<uint8_t> payload(msg.payload().begin(), msg.payload().end());
-                parse_event(msg.method(), payload, ev);
-                emit(ev);
-                if (ev.type == EventType::LiveEnd) disconnected_by_control = true;
-            }
+            bool live_ended = process_fetch_result(batch);
 
             if (!batch.cursor().empty()) cursor = batch.cursor();
             if (!batch.internal_ext().empty()) internal_ext = batch.internal_ext();
             if (batch.fetch_interval() > 0) interval_ms = batch.fetch_interval();
 
-            if (disconnected_by_control) break;
+            if (live_ended) break;
         }
-
-        // 7) Teardown.
-        running.store(false);
-
-        Event ev;
-        ev.type = EventType::Disconnect;
-        ev.method = "Disconnect";
-        emit(ev);
     }
 };
 
@@ -587,6 +760,7 @@ void TikTokLiveClient::run() { impl_->run(); }
 void TikTokLiveClient::disconnect() {
     impl_->stop_requested.store(true);
     impl_->running.store(false);
+    impl_->ws.close();
 }
 
 int64_t TikTokLiveClient::room_id() const { return impl_->room_id; }
