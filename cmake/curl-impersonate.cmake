@@ -88,6 +88,24 @@ if(CI_STATIC)
       list(APPEND _ci_extra ${_ci_lib_${_dep}})
     endif()
   endforeach()
+  # macOS: the static archive references system symbols not otherwise pulled in:
+  #   SystemConfiguration -> proxy discovery (_SCDynamicStoreCopyProxies)
+  #   libiconv            -> _iconv* (charset conversion in the IDN path)
+  #   icucore             -> _uidna_* (IDNA/punycode via system ICU)
+  #   CoreFoundation      -> transitive dep of SystemConfiguration
+  if(APPLE)
+    find_library(_ci_iconv iconv)
+    if(_ci_iconv)
+      list(APPEND _ci_extra ${_ci_iconv})
+    endif()
+    find_library(_ci_icucore icucore)
+    if(_ci_icucore)
+      list(APPEND _ci_extra ${_ci_icucore})
+    endif()
+    list(APPEND _ci_extra
+      "-framework SystemConfiguration"
+      "-framework CoreFoundation")
+  endif()
   target_link_libraries(curl_impersonate::curl_impersonate INTERFACE ${_ci_extra})
 elseif(CI_SHARED)
   set_target_properties(curl_impersonate::curl_impersonate PROPERTIES

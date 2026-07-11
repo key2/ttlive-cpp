@@ -95,7 +95,18 @@ add_library(quickjs STATIC
   ${QJS_DIR}/libunicode.c
   ${QJS_DIR}/cutils.c
 )
-target_include_directories(quickjs PUBLIC ${QJS_DIR})
+# The QuickJS source tree ships a lowercase-clashing "VERSION" file. Exposing
+# the whole tree on the (public) include path makes the C++ standard header
+# lookup for <version> (pulled in by libc++ headers like <array>) resolve to
+# that file on case-insensitive filesystems, breaking every consumer's build.
+# So QuickJS compiles with the full source dir PRIVATE, and we publish only the
+# public header via a dedicated, collision-free include directory.
+set(QJS_PUBLIC_INC ${CMAKE_CURRENT_BINARY_DIR}/quickjs_include)
+file(MAKE_DIRECTORY ${QJS_PUBLIC_INC})
+configure_file(${QJS_DIR}/quickjs.h ${QJS_PUBLIC_INC}/quickjs.h COPYONLY)
+target_include_directories(quickjs
+  PRIVATE ${QJS_DIR}
+  PUBLIC  ${QJS_PUBLIC_INC})
 target_compile_definitions(quickjs PRIVATE CONFIG_VERSION="${QJS_VERSION}")
 if(NOT WIN32)
   target_compile_definitions(quickjs PRIVATE _GNU_SOURCE)
