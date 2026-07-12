@@ -100,6 +100,7 @@ struct Event {
     int32_t repeat_count = 0;
     bool gift_streaking = false;   ///< true while a combo is still in progress
     int32_t diamond_count = 0;
+    int32_t gift_type = 0;         ///< gift type from the embedded Gift (1 = streakable)
 
     // Like
     int32_t like_count = 0;

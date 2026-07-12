@@ -46,6 +46,7 @@ bool parse_event(const std::string& method,
             if (m.has_gift()) {
                 out.gift_name = m.gift().name();
                 out.diamond_count = m.gift().diamond_count();
+                out.gift_type = m.gift().type();
             }
             return true;
         }
