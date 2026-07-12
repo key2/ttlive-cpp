@@ -1,5 +1,14 @@
 #include "web_defaults.hpp"
 
+#include <cstdlib>
+#include <filesystem>
+
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 namespace ttlive {
 namespace web_defaults {
 
@@ -87,6 +96,49 @@ std::string encode_query(const ParamList& params) {
         append_encoded(out, kv.second);
     }
     return out;
+}
+
+const std::string& ca_bundle_path() {
+    static const std::string path = [] {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        // 1. Explicit overrides (same env vars the curl tool honours).
+        for (const char* env : {"CURL_CA_BUNDLE", "SSL_CERT_FILE"}) {
+            const char* v = std::getenv(env);
+            if (v && *v && fs::exists(v, ec)) return std::string(v);
+        }
+
+        // 2. A bundle shipped next to the executable (Windows deployments).
+        fs::path exe_dir;
+#if defined(_WIN32)
+        char buf[MAX_PATH] = {};
+        DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) exe_dir = fs::path(buf).parent_path();
+#elif defined(__APPLE__)
+        char buf[4096];
+        uint32_t sz = sizeof(buf);
+        if (_NSGetExecutablePath(buf, &sz) == 0)
+            exe_dir = fs::path(buf).parent_path();
+#else
+        auto p = fs::read_symlink("/proc/self/exe", ec);
+        if (!ec) exe_dir = p.parent_path();
+#endif
+        for (const fs::path& base : {exe_dir, fs::current_path(ec)}) {
+            if (base.empty()) continue;
+            for (const char* name : {"curl-ca-bundle.crt", "cacert.pem"}) {
+                fs::path cand = base / name;
+                if (fs::exists(cand, ec)) return cand.string();
+            }
+        }
+
+#if defined(_WIN32)
+        // 3. Windows fallback: nothing found; leave "" (connection will fail
+        //    verification, which is better than silently disabling it).
+#endif
+        return std::string();
+    }();
+    return path;
 }
 
 }  // namespace web_defaults

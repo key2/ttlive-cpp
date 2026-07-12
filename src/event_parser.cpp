@@ -11,6 +11,10 @@ void fill_user(const tiktok::User& u, User& out) {
     out.unique_id = u.display_id();
     out.nickname = u.nickname();
     out.verified = u.verified();
+    if (u.has_avatar_thumb() && u.avatar_thumb().url_list_size() > 0)
+        out.avatar_url = u.avatar_thumb().url_list(0);
+    else if (u.has_avatar_medium() && u.avatar_medium().url_list_size() > 0)
+        out.avatar_url = u.avatar_medium().url_list(0);
 }
 
 std::string bytes_to_string(const std::vector<uint8_t>& p) {

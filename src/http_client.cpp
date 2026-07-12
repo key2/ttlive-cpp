@@ -1,5 +1,7 @@
 #include "http_client.hpp"
 
+#include "web_defaults.hpp"
+
 #include <curl/curl.h>
 
 #include <cctype>
@@ -78,6 +80,10 @@ struct HttpClient::Impl {
         if (!curl) throw std::runtime_error("HttpClient: curl_easy_init failed");
         // Enable the in-memory cookie engine so ttwid/msToken persist.
         curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");
+        // CA bundle for TLS verification (required on Windows, where the
+        // curl-impersonate DLL has no OS trust-store integration).
+        const std::string& ca = web_defaults::ca_bundle_path();
+        if (!ca.empty()) curl_easy_setopt(curl, CURLOPT_CAINFO, ca.c_str());
     }
     ~Impl() {
         if (curl) curl_easy_cleanup(curl);
@@ -154,6 +160,11 @@ HttpResponse HttpClient::get(const std::string& full_url,
     curl_easy_reset(c);
     curl_easy_setopt(c, CURLOPT_COOKIEFILE, "");  // keep cookie engine on
     curl_easy_setopt(c, CURLOPT_URL, full_url.c_str());
+
+    // Re-apply after curl_easy_reset: CA bundle for TLS verification
+    // (required on Windows; see web_defaults::ca_bundle_path).
+    const std::string& ca = web_defaults::ca_bundle_path();
+    if (!ca.empty()) curl_easy_setopt(c, CURLOPT_CAINFO, ca.c_str());
 
     // The one call that sets Chrome's TLS/HTTP2/header fingerprints.
     curl_easy_impersonate(c, impersonate_.c_str(), 1L);

@@ -29,5 +29,14 @@ ParamList base_ws_params();
 /// Serialize a param list to ``k=v&k=v`` (no leading '?').
 std::string encode_query(const ParamList& params);
 
+/// Path to a CA certificate bundle usable as CURLOPT_CAINFO, or "" to keep
+/// libcurl's built-in default. Needed on Windows: the curl-impersonate DLL
+/// (BoringSSL) has no OS trust-store integration and no baked-in CA path, so
+/// a ``curl-ca-bundle.crt`` / ``cacert.pem`` shipped next to the executable
+/// (or pointed to by $CURL_CA_BUNDLE / $SSL_CERT_FILE) is used instead.
+/// On Linux/macOS the static build's compiled-in default usually works and
+/// this returns "" unless an override exists.
+const std::string& ca_bundle_path();
+
 }  // namespace web_defaults
 }  // namespace ttlive

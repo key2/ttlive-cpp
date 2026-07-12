@@ -45,6 +45,7 @@ struct User {
     std::string unique_id;   ///< @handle (display_id)
     std::string nickname;    ///< Display name
     bool verified = false;
+    std::string avatar_url;  ///< First CDN URL of the profile thumbnail
 };
 
 /// A gift definition from the room's gift list (/webcast/gift/list/).

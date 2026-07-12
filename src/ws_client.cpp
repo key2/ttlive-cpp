@@ -2,6 +2,8 @@
 
 #include <curl/curl.h>
 
+#include "web_defaults.hpp"
+
 #include <stdexcept>
 #include <string>
 
@@ -36,6 +38,10 @@ void WsClient::connect(const std::string& wss_url,
     curl_easy_setopt(c, CURLOPT_URL, wss_url.c_str());
     // Chrome TLS/HTTP fingerprint (same as the REST client).
     curl_easy_impersonate(c, "chrome131", 1L);
+    // CA bundle for TLS verification (required on Windows, where the
+    // curl-impersonate DLL has no OS trust-store integration).
+    const std::string& ca = web_defaults::ca_bundle_path();
+    if (!ca.empty()) curl_easy_setopt(c, CURLOPT_CAINFO, ca.c_str());
 
     // Establish the WebSocket, then drive frames manually.
     curl_easy_setopt(c, CURLOPT_CONNECT_ONLY, 2L);
