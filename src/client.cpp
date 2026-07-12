@@ -202,6 +202,12 @@ struct TikTokLiveClient::Impl {
             for (const auto& cb : it->second) cb(ev);
     }
 
+    // Forward raw received bytes to the debug sink (if installed).
+    void sink(const std::string& kind, const void* data, size_t len) {
+        if (options.raw_sink)
+            options.raw_sink(kind, static_cast<const uint8_t*>(data), len);
+    }
+
     // ---- REST steps -------------------------------------------------------
 
     std::string signed_url(const std::string& base_url_no_query,
@@ -439,6 +445,8 @@ struct TikTokLiveClient::Impl {
                 " (TikTok rejected the request — signature/cookies/fingerprint).");
         }
 
+        sink("im_fetch", resp.body.data(), resp.body.size());
+
         tiktok::ProtoMessageFetchResult result;
         if (!result.ParseFromString(resp.body)) {
             throw std::runtime_error(
@@ -454,6 +462,7 @@ struct TikTokLiveClient::Impl {
             Event ev;
             const std::string& method = msg.method();
             std::vector<uint8_t> payload(msg.payload().begin(), msg.payload().end());
+            sink("msg:" + method, payload.data(), payload.size());
             parse_event(method, payload, ev);
             emit(ev);
             if (ev.type == EventType::LiveEnd) live_ended = true;
@@ -533,6 +542,9 @@ struct TikTokLiveClient::Impl {
     // (optionally gzipped) ProtoMessageFetchResult and dispatch its events.
     // Returns true if the live ended.
     bool ws_handle_frame(const std::vector<uint8_t>& raw) {
+        // Sink the frame *before* any parsing so even undecodable frames are
+        // captured in debug dumps.
+        sink("ws_frame", raw.data(), raw.size());
         tiktok::WebcastPushFrame frame;
         if (!frame.ParseFromArray(raw.data(), static_cast<int>(raw.size()))) return false;
         if (frame.payload_type() != "msg") return false;

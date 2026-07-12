@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -39,6 +41,18 @@ struct ClientOptions {
     /// Directory containing the TikTok SDK JS files used by the QuickJS signer.
     /// Empty = the compile-time default (the project's ``js/`` directory).
     std::string js_dir;
+
+    /// Optional debug sink receiving 100% of the payload bytes received from
+    /// TikTok, *before* any parsing/filtering, so nothing can be silently
+    /// dropped. Called from the client thread with:
+    ///   kind = "ws_frame"      raw incoming WebSocket binary frame
+    ///                          (WebcastPushFrame, as received)
+    ///   kind = "im_fetch"      raw /webcast/im/fetch/ HTTP response body
+    ///                          (ProtoMessageFetchResult)
+    ///   kind = "msg:<Method>"  each decoded webcast message's payload
+    ///                          (e.g. "msg:WebcastGiftMessage")
+    std::function<void(const std::string& kind, const uint8_t* data, size_t len)>
+        raw_sink;
 };
 
 using EventCallback = std::function<void(const Event&)>;
