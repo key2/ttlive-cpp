@@ -6601,10 +6601,11 @@ message WebcastLinkMessage {
 message WebcastLinkMicArmies {
   optional CommonMessageData common = 1;
   int64 battle_id = 2;
-  // Upstream generates this as map<string, string>, but the values are
-  // serialized protobuf submessages (raw binary). proto3 UTF-8 validation
-  // makes parsing fail on them, so declare bytes (wire-compatible).
-  map<string, bytes> armies = 3;
+  // Upstream generates this as map<string, string>, but on the wire the
+  // keys are varint host user-ids and the values are serialized protobuf
+  // submessages (raw binary). proto3 UTF-8 validation makes parsing fail
+  // on the binary values, so declare the actual types.
+  map<int64, bytes> armies = 3;
   int64 channel_id = 4;
   int64 send_gift_success_time = 5;
   int64 update_battle_score_time = 6;
