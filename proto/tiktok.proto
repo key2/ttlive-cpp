@@ -6601,7 +6601,10 @@ message WebcastLinkMessage {
 message WebcastLinkMicArmies {
   optional CommonMessageData common = 1;
   int64 battle_id = 2;
-  map<string, string> armies = 3;
+  // Upstream generates this as map<string, string>, but the values are
+  // serialized protobuf submessages (raw binary). proto3 UTF-8 validation
+  // makes parsing fail on them, so declare bytes (wire-compatible).
+  map<string, bytes> armies = 3;
   int64 channel_id = 4;
   int64 send_gift_success_time = 5;
   int64 update_battle_score_time = 6;
@@ -6627,7 +6630,8 @@ message WebcastLinkMicBattle {
   int64 battle_id = 2;
   optional BattleSetting battle_settings = 3;
   LinkMicBattleBattleAction action = 4;
-  map<string, string> battle_result = 5;
+  // Binary submessage values, same as WebcastLinkMicArmies.armies.
+  map<string, bytes> battle_result = 5;
   optional BattleDisplayConfig fuzzy_display_config = 6;
   GiftPermissionType invitee_gift_permission_type = 8;
   repeated UserArmiesWrapper armies = 9;
