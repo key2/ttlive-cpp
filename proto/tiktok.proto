@@ -3088,7 +3088,7 @@ message Gift {
   bool is_box_gift = 52;
   bool can_put_in_gift_box = 53;
   optional GiftBoxInfo gift_box_info = 54;
-  map<string, string> tracker_params = 100;
+  map<string, bytes> tracker_params = 100;  // may carry non-UTF-8; see gift_resources
   optional GiftLockInfo lock_info = 101;
   repeated GiftColorInfo color_infos = 102;
   string gift_rank_recommend_info = 103;
@@ -3109,9 +3109,12 @@ message Gift {
   optional UgGiftStructInfo ug_gift_info = 118;
   optional CrossScreenEffectInfo cross_screen_effect_info = 119;
   optional GiftPanelBeaconBubble beacon_bubble = 120;
-  map<string, string> gift_resources = 121;
+  // Values are binary resource blobs (non-UTF-8). Declared bytes so proto3
+  // UTF-8 validation can't fail the whole WebcastGiftMessage parse (which
+  // would silently drop the gift). Wire-compatible with string.
+  map<string, bytes> gift_resources = 121;
   int64 resource_id = 122;
-  map<string, string> biz_extra = 123;
+  map<string, bytes> biz_extra = 123;  // may carry non-UTF-8; see gift_resources
   optional LynxCrossScreenEffectInfo lynx_cross_screen_effect_info = 124;
   string gift_struct_hash = 125;
   optional SchemeInfo scheme_info = 126;
