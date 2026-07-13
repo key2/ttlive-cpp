@@ -194,6 +194,7 @@ struct TikTokLiveClient::Impl {
 
     std::atomic<bool> running{false};
     std::atomic<bool> stop_requested{false};
+    bool ws_ever_connected = false;  // did the WebSocket ever connect?
 
     void emit(const Event& ev) {
         for (const auto& cb : any_handlers) cb(ev);
@@ -569,31 +570,42 @@ struct TikTokLiveClient::Impl {
         return process_fetch_result(result);
     }
 
-    // Run the WebSocket event stream. Returns true if it ran (connected);
-    // false if the handshake failed (caller should fall back to polling).
-    bool run_websocket(const tiktok::ProtoMessageFetchResult& initial) {
+    // Outcome of a single WebSocket session.
+    enum class WsResult {
+        HandshakeFailed,  // never connected (caller may fall back / retry)
+        LiveEnded,        // the LIVE ended (terminal — do not reconnect)
+        Stopped,          // disconnect() was requested (terminal)
+        Dropped           // the socket closed/errored mid-stream (reconnect)
+    };
+
+    // Run one WebSocket session to completion. On a clean connect the loop
+    // pumps frames until the LIVE ends, the socket drops, or a stop is
+    // requested; the return value tells the caller what happened.
+    WsResult run_websocket(const tiktok::ProtoMessageFetchResult& initial) {
         std::string url;
         try {
             url = build_ws_url(initial.cursor(), initial.internal_ext());
             ws.connect(url, http.cookie_header(), http.user_agent());
         } catch (const std::exception&) {
-            return false;
+            return WsResult::HandshakeFailed;
         }
+        ws_ever_connected = true;
 
         ws_send_enter_room();
 
         auto last_hb = std::chrono::steady_clock::now();
         const auto hb_interval = std::chrono::seconds(10);
 
+        bool live_ended = false;
         while (running.load() && !stop_requested.load() && ws.connected()) {
             std::vector<uint8_t> msg;
             WsClient::RecvStatus st = ws.recv_binary(msg);
             if (st == WsClient::RecvStatus::Message) {
-                if (ws_handle_frame(msg)) break;  // live ended
+                if (ws_handle_frame(msg)) { live_ended = true; break; }
             } else if (st == WsClient::RecvStatus::Again) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             } else {
-                break;  // Closed or Error
+                break;  // Closed or Error — reconnect
             }
 
             auto now = std::chrono::steady_clock::now();
@@ -603,6 +615,67 @@ struct TikTokLiveClient::Impl {
             }
         }
         ws.close();
+
+        if (stop_requested.load()) return WsResult::Stopped;
+        if (live_ended) return WsResult::LiveEnded;
+        return WsResult::Dropped;
+    }
+
+    // Sleep up to `ms`, but wake early if a stop is requested.
+    void interruptible_sleep(int ms) {
+        for (int slept = 0; slept < ms && running.load() && !stop_requested.load();
+             slept += 50)
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(std::min(50, ms - slept)));
+    }
+
+    // Drive the WebSocket with automatic reconnection. Returns true if the WS
+    // path handled the whole session (LIVE ended or user stopped); false if we
+    // never managed to connect and the caller should fall back to polling.
+    bool run_websocket_with_reconnect(tiktok::ProtoMessageFetchResult initial) {
+        tiktok::ProtoMessageFetchResult cur = initial;
+        int consecutive_handshake_fails = 0;
+        constexpr int kMaxHandshakeFails = 6;  // then give up WS -> poll
+
+        while (running.load() && !stop_requested.load()) {
+            WsResult r = run_websocket(cur);
+
+            switch (r) {
+                case WsResult::LiveEnded:
+                case WsResult::Stopped:
+                    return true;  // terminal — WS handled the session
+
+                case WsResult::HandshakeFailed:
+                    // Never connected at all: let the caller poll instead.
+                    if (!ws_ever_connected) return false;
+                    // We had connected before — this is a failed *reconnect*.
+                    if (++consecutive_handshake_fails >= kMaxHandshakeFails)
+                        return false;  // give up WS, fall back to polling
+                    break;
+
+                case WsResult::Dropped:
+                    consecutive_handshake_fails = 0;
+                    break;
+            }
+
+            if (!running.load() || stop_requested.load()) return true;
+
+            // Reconnect: brief backoff, then refresh the cursor via a REST
+            // fetch so the new socket resumes from the right place. We do NOT
+            // emit those messages as events (they may repeat what the socket
+            // already delivered); we only want the fresh cursor/internal_ext.
+            int backoff = consecutive_handshake_fails > 0
+                              ? std::min(500 * consecutive_handshake_fails, 5000)
+                              : 300;
+            interruptible_sleep(backoff);
+            if (!running.load() || stop_requested.load()) return true;
+
+            try {
+                cur = fetch_once(cur.cursor(), cur.internal_ext());
+            } catch (const std::exception&) {
+                // Keep the previous cursor and retry the socket anyway.
+            }
+        }
         return true;
     }
 
@@ -674,13 +747,16 @@ struct TikTokLiveClient::Impl {
             process_fetch_result(initial);
         }
 
-        // 6) Real-time transport: WebSocket first (low latency), falling back
-        //    to HTTP long-polling if the WS handshake fails.
-        bool ws_ran = false;
+        // 6) Real-time transport. Honours ClientOptions::use_websocket:
+        //    * WebSocket (default): low latency, with automatic reconnection
+        //      on drops; falls back to HTTP long-polling only if we can never
+        //      establish the socket.
+        //    * Polling: HTTP long-poll loop directly.
+        bool ws_handled = false;
         if (options.use_websocket) {
-            ws_ran = run_websocket(initial);
+            ws_handled = run_websocket_with_reconnect(initial);
         }
-        if (!ws_ran) {
+        if (!ws_handled) {
             poll_loop(initial);
         }
 
