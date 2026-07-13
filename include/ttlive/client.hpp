@@ -12,9 +12,21 @@ namespace ttlive {
 
 /// Options controlling how the client connects.
 struct ClientOptions {
-    /// Use the real-time WebSocket transport (low latency). Falls back to HTTP
-    /// long-polling automatically if the WS handshake fails.
+    /// Use the real-time WebSocket transport (low latency, auto-reconnect on
+    /// drop). If use_polling is false, a WS handshake failure falls back to
+    /// HTTP long-polling.
     bool use_websocket = true;
+
+    /// Run the HTTP long-polling transport. Combined with use_websocket this
+    /// runs BOTH transports concurrently ("dual mode"): every message is
+    /// de-duplicated by its server msg_id and delivered to callbacks exactly
+    /// once, so the count stays accurate even if one transport misses a
+    /// message or the WebSocket drops. Polling is more complete; the socket is
+    /// faster — dual mode gets both.
+    ///   use_websocket=1, use_polling=0  -> WebSocket only (default)
+    ///   use_websocket=0, use_polling=1  -> polling only
+    ///   use_websocket=1, use_polling=1  -> both, deduplicated
+    bool use_polling = false;
 
     /// Whether to check the user is live before connecting (recommended).
     bool fetch_live_check = true;

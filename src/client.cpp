@@ -4,12 +4,14 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <map>
 #include <mutex>
 #include <regex>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <zlib.h>
 
@@ -194,7 +196,33 @@ struct TikTokLiveClient::Impl {
 
     std::atomic<bool> running{false};
     std::atomic<bool> stop_requested{false};
-    bool ws_ever_connected = false;  // did the WebSocket ever connect?
+    std::atomic<bool> live_ended{false};  // a LiveEnd was dispatched
+    bool ws_ever_connected = false;        // did the WebSocket ever connect?
+
+    // Dispatch serialization + cross-transport de-duplication. Both the WS and
+    // the polling loop route every message through dispatch_message(); the
+    // mutex serializes callback delivery and guards the seen-id set, and the
+    // set drops messages already delivered (by server msg_id) so running both
+    // transports never double-counts.
+    std::mutex dispatch_mu_;
+    std::unordered_set<int64_t> seen_ids_;
+    std::deque<int64_t> seen_order_;
+    static constexpr size_t kMaxSeenIds = 500000;
+
+    // Serializes all HTTP + QuickJS-signer access. The HttpClient wraps a
+    // single curl handle and the signer holds one JS runtime; in dual mode the
+    // polling thread and the WebSocket (re)connect both touch them, so every
+    // network/signing operation must be mutually exclusive.
+    std::mutex net_mu_;
+
+    void remember_id(int64_t id) {
+        seen_ids_.insert(id);
+        seen_order_.push_back(id);
+        if (seen_order_.size() > kMaxSeenIds) {
+            seen_ids_.erase(seen_order_.front());
+            seen_order_.pop_front();
+        }
+    }
 
     void emit(const Event& ev) {
         for (const auto& cb : any_handlers) cb(ev);
@@ -428,6 +456,10 @@ struct TikTokLiveClient::Impl {
     // returned here, so we poll.)
     tiktok::ProtoMessageFetchResult fetch_once(const std::string& cursor,
                                                const std::string& internal_ext) {
+        // Serialize with the WebSocket (re)connect in dual mode: shared curl
+        // handle + single-threaded signer.
+        std::lock_guard<std::mutex> net_lk(net_mu_);
+
         ParamList params = web_defaults::base_web_params();
         params.push_back({"room_id", std::to_string(room_id)});
         params.push_back({"resp_content_type", "protobuf"});
@@ -456,19 +488,38 @@ struct TikTokLiveClient::Impl {
         return result;
     }
 
-    // Turn a ProtoMessageFetchResult into events.
-    bool process_fetch_result(const tiktok::ProtoMessageFetchResult& result) {
-        bool live_ended = false;
-        for (const auto& msg : result.messages()) {
-            Event ev;
-            const std::string& method = msg.method();
-            std::vector<uint8_t> payload(msg.payload().begin(), msg.payload().end());
-            sink("msg:" + method, payload.data(), payload.size());
-            parse_event(method, payload, ev);
-            emit(ev);
-            if (ev.type == EventType::LiveEnd) live_ended = true;
+    // Dispatch a single message: de-duplicate by server msg_id (so running
+    // both transports, or a poll refetch overlapping the socket, never
+    // delivers the same message twice), then parse and emit it. Thread-safe.
+    // Returns true if this message signalled the LIVE ended.
+    bool dispatch_message(const tiktok::BaseProtoMessage& msg) {
+        std::lock_guard<std::mutex> lk(dispatch_mu_);
+        const int64_t id = msg.msg_id();
+        if (id != 0) {
+            if (seen_ids_.find(id) != seen_ids_.end())
+                return false;  // already delivered via the other transport
+            remember_id(id);
         }
-        return live_ended;
+        Event ev;
+        ev.msg_id = id;
+        const std::string& method = msg.method();
+        std::vector<uint8_t> payload(msg.payload().begin(), msg.payload().end());
+        sink("msg:" + method, payload.data(), payload.size());
+        parse_event(method, payload, ev);
+        emit(ev);
+        if (ev.type == EventType::LiveEnd) {
+            live_ended.store(true);
+            return true;
+        }
+        return false;
+    }
+
+    // Turn a ProtoMessageFetchResult into events (deduplicated).
+    bool process_fetch_result(const tiktok::ProtoMessageFetchResult& result) {
+        bool ended = false;
+        for (const auto& msg : result.messages())
+            if (dispatch_message(msg)) ended = true;
+        return ended;
     }
 
     // ---- WebSocket transport ---------------------------------------------
@@ -584,8 +635,17 @@ struct TikTokLiveClient::Impl {
     WsResult run_websocket(const tiktok::ProtoMessageFetchResult& initial) {
         std::string url;
         try {
-            url = build_ws_url(initial.cursor(), initial.internal_ext());
-            ws.connect(url, http.cookie_header(), http.user_agent());
+            // Build+sign the URL and read cookies under the network lock (the
+            // signer and http cookie state are shared with the poll thread);
+            // the WS handshake itself uses the separate WsClient handle.
+            std::string cookies, ua;
+            {
+                std::lock_guard<std::mutex> net_lk(net_mu_);
+                url = build_ws_url(initial.cursor(), initial.internal_ext());
+                cookies = http.cookie_header();
+                ua = http.user_agent();
+            }
+            ws.connect(url, cookies, ua);
         } catch (const std::exception&) {
             return WsResult::HandshakeFailed;
         }
@@ -596,12 +656,13 @@ struct TikTokLiveClient::Impl {
         auto last_hb = std::chrono::steady_clock::now();
         const auto hb_interval = std::chrono::seconds(10);
 
-        bool live_ended = false;
-        while (running.load() && !stop_requested.load() && ws.connected()) {
+        bool ws_saw_live_end = false;
+        while (running.load() && !stop_requested.load() && !live_ended.load() &&
+               ws.connected()) {
             std::vector<uint8_t> msg;
             WsClient::RecvStatus st = ws.recv_binary(msg);
             if (st == WsClient::RecvStatus::Message) {
-                if (ws_handle_frame(msg)) { live_ended = true; break; }
+                if (ws_handle_frame(msg)) { ws_saw_live_end = true; break; }
             } else if (st == WsClient::RecvStatus::Again) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             } else {
@@ -617,7 +678,7 @@ struct TikTokLiveClient::Impl {
         ws.close();
 
         if (stop_requested.load()) return WsResult::Stopped;
-        if (live_ended) return WsResult::LiveEnded;
+        if (ws_saw_live_end || live_ended.load()) return WsResult::LiveEnded;
         return WsResult::Dropped;
     }
 
@@ -632,12 +693,15 @@ struct TikTokLiveClient::Impl {
     // Drive the WebSocket with automatic reconnection. Returns true if the WS
     // path handled the whole session (LIVE ended or user stopped); false if we
     // never managed to connect and the caller should fall back to polling.
-    bool run_websocket_with_reconnect(tiktok::ProtoMessageFetchResult initial) {
+    // When allow_fallback is false (dual mode, polling already running), a
+    // dead socket keeps retrying instead of giving up.
+    bool run_websocket_with_reconnect(tiktok::ProtoMessageFetchResult initial,
+                                      bool allow_fallback = true) {
         tiktok::ProtoMessageFetchResult cur = initial;
         int consecutive_handshake_fails = 0;
         constexpr int kMaxHandshakeFails = 6;  // then give up WS -> poll
 
-        while (running.load() && !stop_requested.load()) {
+        while (running.load() && !stop_requested.load() && !live_ended.load()) {
             WsResult r = run_websocket(cur);
 
             switch (r) {
@@ -646,10 +710,12 @@ struct TikTokLiveClient::Impl {
                     return true;  // terminal — WS handled the session
 
                 case WsResult::HandshakeFailed:
-                    // Never connected at all: let the caller poll instead.
-                    if (!ws_ever_connected) return false;
-                    // We had connected before — this is a failed *reconnect*.
-                    if (++consecutive_handshake_fails >= kMaxHandshakeFails)
+                    // Never connected at all: let the caller poll instead
+                    // (unless polling is already running in dual mode).
+                    if (!ws_ever_connected && allow_fallback) return false;
+                    // A failed *reconnect*.
+                    if (allow_fallback &&
+                        ++consecutive_handshake_fails >= kMaxHandshakeFails)
                         return false;  // give up WS, fall back to polling
                     break;
 
@@ -658,7 +724,8 @@ struct TikTokLiveClient::Impl {
                     break;
             }
 
-            if (!running.load() || stop_requested.load()) return true;
+            if (!running.load() || stop_requested.load() || live_ended.load())
+                return true;
 
             // Reconnect: brief backoff, then refresh the cursor via a REST
             // fetch so the new socket resumes from the right place. We do NOT
@@ -682,6 +749,7 @@ struct TikTokLiveClient::Impl {
     void run() {
         running.store(true);
         stop_requested.store(false);
+        live_ended.store(false);
 
         // 0) Warm up: hit the homepage so TikTok issues a ttwid cookie (the
         //    Chrome-fingerprinted transport gets past the WAF). Best-effort.
@@ -747,16 +815,24 @@ struct TikTokLiveClient::Impl {
             process_fetch_result(initial);
         }
 
-        // 6) Real-time transport. Honours ClientOptions::use_websocket:
-        //    * WebSocket (default): low latency, with automatic reconnection
-        //      on drops; falls back to HTTP long-polling only if we can never
-        //      establish the socket.
-        //    * Polling: HTTP long-poll loop directly.
-        bool ws_handled = false;
-        if (options.use_websocket) {
-            ws_handled = run_websocket_with_reconnect(initial);
-        }
-        if (!ws_handled) {
+        // 6) Real-time transport. Honours use_websocket / use_polling:
+        //    * WS only  : low latency + auto-reconnect; falls back to polling
+        //                 if the socket can never be established.
+        //    * poll only: HTTP long-poll loop.
+        //    * both     : run concurrently; messages are de-duplicated by
+        //                 msg_id so nothing is counted twice, and if the socket
+        //                 drops the poll loop keeps the count flowing.
+        if (options.use_websocket && options.use_polling) {
+            // Dual mode: poll in a background thread, WS in this one. Neither
+            // stops the other except via stop_requested / live_ended.
+            std::thread poller([this, initial]() { poll_loop(initial); });
+            run_websocket_with_reconnect(initial, /*allow_fallback=*/false);
+            stop_requested.store(true);  // wake the poll loop if WS ended first
+            if (poller.joinable()) poller.join();
+        } else if (options.use_websocket) {
+            if (!run_websocket_with_reconnect(initial, /*allow_fallback=*/true))
+                poll_loop(initial);
+        } else {
             poll_loop(initial);
         }
 
@@ -776,13 +852,14 @@ struct TikTokLiveClient::Impl {
         std::string internal_ext = initial.internal_ext();
         int64_t interval_ms = initial.fetch_interval() > 0 ? initial.fetch_interval() : 1000;
 
-        while (running.load() && !stop_requested.load()) {
-            for (int64_t slept = 0; slept < interval_ms && running.load() && !stop_requested.load();
+        while (running.load() && !stop_requested.load() && !live_ended.load()) {
+            for (int64_t slept = 0; slept < interval_ms && running.load() &&
+                                    !stop_requested.load() && !live_ended.load();
                  slept += 100) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(
                     std::min<int64_t>(100, interval_ms - slept)));
             }
-            if (!running.load() || stop_requested.load()) break;
+            if (!running.load() || stop_requested.load() || live_ended.load()) break;
 
             tiktok::ProtoMessageFetchResult batch;
             try {

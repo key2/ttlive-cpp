@@ -89,6 +89,12 @@ struct Event {
     EventType type = EventType::Unknown;
     std::string method;
 
+    /// Server-assigned unique message id (BaseProtoMessage.msg_id). Stable
+    /// across transports (the same message delivered over WebSocket and over
+    /// HTTP polling carries the same msg_id), so it is a reliable key for
+    /// de-duplication. 0 if unknown (e.g. the synthetic Connect/Disconnect).
+    int64_t msg_id = 0;
+
     // Who triggered it (when applicable).
     User user;
 
