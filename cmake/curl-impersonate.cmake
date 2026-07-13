@@ -80,7 +80,14 @@ if(CI_STATIC)
   # A static BoringSSL/brotli/zlib build pulls in C++/math/compression symbols.
   find_package(Threads REQUIRED)
   find_package(ZLIB REQUIRED)
-  set(_ci_extra stdc++ m Threads::Threads ZLIB::ZLIB)
+  # The C++ runtime name differs by platform: libc++ on macOS (there is no
+  # libstdc++), libstdc++ elsewhere.
+  if(APPLE)
+    set(_ci_cxxrt c++)
+  else()
+    set(_ci_cxxrt stdc++)
+  endif()
+  set(_ci_extra ${_ci_cxxrt} m Threads::Threads ZLIB::ZLIB)
   # brotli / zstd / idn2 if present on the system (curl-impersonate deps).
   foreach(_dep brotlienc brotlidec brotlicommon zstd idn2)
     find_library(_ci_lib_${_dep} ${_dep})
