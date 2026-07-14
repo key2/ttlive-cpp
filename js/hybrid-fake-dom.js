@@ -888,7 +888,47 @@ var nativeBuiltins = {
     URIError: URIError, EvalError: EvalError, ReferenceError: ReferenceError,
     NaN: NaN, Infinity: Infinity, undefined: undefined, null: null,
     eval: eval,
+    // Function is REQUIRED: newer webmssdk builds run inside an obfuscated
+    // bytecode VM that resolves EVERY global identifier through `window`
+    // (effectively `name in window ? window[name] : throw`). Any standard JS
+    // builtin the VM references (Function, BigInt, Atomics, ...) must therefore
+    // be answerable by the window proxy, or it throws "X is not defined".
+    Function: Function,
+    BigInt: (typeof BigInt !== 'undefined' ? BigInt : undefined),
+    BigInt64Array: (typeof BigInt64Array !== 'undefined' ? BigInt64Array : undefined),
+    BigUint64Array: (typeof BigUint64Array !== 'undefined' ? BigUint64Array : undefined),
+    Atomics: (typeof Atomics !== 'undefined' ? Atomics : undefined),
+    AggregateError: (typeof AggregateError !== 'undefined' ? AggregateError : undefined),
 };
+
+// Robustly expose EVERY standard JS global builtin through the window proxy so
+// the SDK's VM never hits an unresolved global. We sweep the real engine
+// globals rather than hand-maintaining a list, but deliberately EXCLUDE globals
+// a real Chrome (matching our navigator.userAgent) does NOT expose, so the fake
+// window's builtin surface matches that Chrome:
+//   - InternalError / __date_clock : engine-specific (QuickJS/quickjs-ng), not in Chrome
+//   - SharedArrayBuffer            : absent on a normal (non-cross-origin-isolated) page
+//   - Float16Array                 : quickjs-ng has it, but Chrome only shipped it ~v135
+//   - globalThis                   : handled explicitly by the window proxy (=== window)
+(function () {
+    var engineSpecific = { InternalError: 1, __date_clock: 1, SharedArrayBuffer: 1, Float16Array: 1, globalThis: 1 };
+    var names = Object.getOwnPropertyNames(globalThis);
+    for (var i = 0; i < names.length; i++) {
+        var nm = names[i];
+        if (engineSpecific[nm]) continue;
+        if (!(nm in nativeBuiltins)) {
+            try { nativeBuiltins[nm] = globalThis[nm]; } catch (e) {}
+        }
+    }
+    // Real Chrome exposes these globals but this QuickJS build may lack them —
+    // provide faithful shims so `X in window` is true and construction works.
+    if (typeof nativeBuiltins.WeakRef === 'undefined') {
+        nativeBuiltins.WeakRef = function (o) { this.deref = function () { return o; }; };
+    }
+    if (typeof nativeBuiltins.FinalizationRegistry === 'undefined') {
+        nativeBuiltins.FinalizationRegistry = function () { this.register = function () {}; this.unregister = function () {}; };
+    }
+})();
 
 // ============================================================
 // Browser API stubs map
