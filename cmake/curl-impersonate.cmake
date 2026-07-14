@@ -72,7 +72,8 @@ find_library(CI_SHARED
   PATHS "${_ci_root}" "${_ci_root}/lib"
   NO_DEFAULT_PATH)
 
-add_library(curl_impersonate::curl_impersonate UNKNOWN IMPORTED)
+# GLOBAL: parent projects link this too (e.g. DearTT's model downloader).
+add_library(curl_impersonate::curl_impersonate UNKNOWN IMPORTED GLOBAL)
 if(CI_STATIC)
   set_target_properties(curl_impersonate::curl_impersonate PROPERTIES
     IMPORTED_LOCATION "${CI_STATIC}")
