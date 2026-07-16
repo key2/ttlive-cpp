@@ -51,6 +51,13 @@ bool parse_event(const std::string& method,
                 out.gift_name = m.gift().name();
                 out.diamond_count = m.gift().diamond_count();
                 out.gift_type = m.gift().type();
+                // Icon URL straight from the event (image, then icon), used as
+                // a fallback when the room's gift list omits this gift.
+                const auto& g = m.gift();
+                if (g.has_image() && g.image().url_list_size() > 0)
+                    out.gift_icon_url = g.image().url_list(0);
+                else if (g.has_icon() && g.icon().url_list_size() > 0)
+                    out.gift_icon_url = g.icon().url_list(0);
             }
             return true;
         }

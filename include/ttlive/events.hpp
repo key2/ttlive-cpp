@@ -108,6 +108,9 @@ struct Event {
     bool gift_streaking = false;   ///< true while a combo is still in progress
     int32_t diamond_count = 0;
     int32_t gift_type = 0;         ///< gift type from the embedded Gift (1 = streakable)
+    std::string gift_icon_url;     ///< icon URL from the embedded Gift.image
+                                   ///< (fallback when the room gift list omits
+                                   ///< this gift, e.g. basic/universal gifts)
 
     // Like
     int32_t like_count = 0;
