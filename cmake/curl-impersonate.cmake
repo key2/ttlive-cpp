@@ -118,8 +118,17 @@ if(CI_STATIC)
 elseif(CI_SHARED)
   set_target_properties(curl_impersonate::curl_impersonate PROPERTIES
     IMPORTED_LOCATION "${CI_SHARED}")
-  message(WARNING "curl-impersonate: only the shared lib was found; if you hit "
-                  "'terminate called recursively', use the static archive.")
+  if(WIN32)
+    # The Windows release is a self-contained libcurl-impersonate.dll (static CRT, BoringSSL,
+    # nghttp2, brotli, zstd inside; imports only system DLLs). It is linked through its import
+    # library (an MSVC .lib, or a .dll.a generated with gendef/dlltool for mingw-w64) and the
+    # DLL ships next to the executable. The libunwind clash above is specific to the zig-built
+    # Linux .so, so a shared library is the normal case here.
+    message(STATUS "curl-impersonate (shared, Windows DLL): ${CI_SHARED}")
+  else()
+    message(WARNING "curl-impersonate: only the shared lib was found; if you hit "
+                    "'terminate called recursively', use the static archive.")
+  endif()
 else()
   message(FATAL_ERROR "libcurl-impersonate not found under ${_ci_root}")
 endif()

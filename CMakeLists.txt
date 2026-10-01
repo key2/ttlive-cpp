@@ -5,12 +5,14 @@ cmake_minimum_required(VERSION 3.16)
 # connects to TikTok LIVE and receives (does not send) chat/gift/like/etc.
 # events over the Webcast WebSocket protocol.
 #
-# Dependencies (resolved via find_package; on Windows use the vcpkg toolchain):
-#   - Boost (Beast + Asio)          : HTTP(S) + WebSocket transport
-#   - OpenSSL                       : TLS + MD5 for the signature code
+# Dependencies (resolved via find_package; on Windows use the vcpkg toolchain
+# or, for a mingw-w64 cross build, a prefix of cross-built libraries):
+#   - curl-impersonate (prebuilt)   : HTTP(S) + WebSocket transport, TLS (BoringSSL inside)
 #   - protobuf                      : Webcast message (de)serialization
 #   - ZLIB                          : gzip decompression of WS payloads
 #   - Threads
+#   (OpenSSL is NOT needed: no source includes it; TLS and the signature path live in
+#    curl-impersonate and QuickJS.)
 #
 # vcpkg example configure:
 #   cmake -B build -S . \
@@ -31,7 +33,6 @@ endif()
 # Dependencies
 # ---------------------------------------------------------------------------
 find_package(Threads REQUIRED)
-find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 
 # curl-impersonate: BoringSSL-based libcurl fork that reproduces Chrome's TLS /
@@ -152,8 +153,6 @@ target_link_libraries(ttlive
   PRIVATE
     quickjs
     curl_impersonate::curl_impersonate
-    OpenSSL::SSL
-    OpenSSL::Crypto
     ZLIB::ZLIB
 )
 
