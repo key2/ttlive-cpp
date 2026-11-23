@@ -164,6 +164,17 @@ void QuickJsSigner::ensure_initialized() {
         "acrawler-init");
     impl_->drain();
 
+    // Capture a standalone reference to frontierSign (the new SDK's signing API).
+    // Calling it detached (this=undefined) is required; calling it as a method
+    // (ac.frontierSign(url)) crashes in newer builds.
+    impl_->eval(
+        "(function(){"
+        "var ac=globalThis.byted_acrawler||(globalThis.window&&globalThis.window.byted_acrawler);"
+        "globalThis.__tt_frontierSign = ac ? ac.frontierSign : null;"
+        "})();",
+        "frontierSign-ref");
+    impl_->drain();
+
     initialized_ = true;
 }
 
@@ -182,21 +193,35 @@ std::string QuickJsSigner::sign(const std::string& url) {
     const std::string qurl = json_quote(url);
     std::string code =
         "(function(){"
-        "var xhr=new XMLHttpRequest();"
-        "xhr.open('GET'," + qurl + ");"
-        "xhr.send();"
-        "var u=xhr._url||" + qurl + ";"
-        "var h=xhr._headers||{};"
-        "var b=h[\"X-Bogus\"]||\"\";"
-        "var g=h[\"X-Gnarly\"]||\"\";"
-        "if(!b&&u.indexOf('X-Bogus=')>=0){"
-        "  var m=u.match(/X-Bogus=([^&]*)/);if(m)b=decodeURIComponent(m[1]);"
-        "  var m2=u.match(/X-Gnarly=([^&]*)/);if(m2)g=decodeURIComponent(m2[1]);"
+        "var f = globalThis.__tt_frontierSign;"
+        "var b = '', g = '', u = " + qurl + ";"
+        "if(f){"
+        "  try{"
+        "    var r = f(" + qurl + ");"
+        "    if(r && typeof r === 'object'){"
+        "      b = r['X-Bogus'] || '';"
+        "      g = r['X-Gnarly'] || '';"
+        "    }"
+        "  }catch(e){}"
         "}"
-        // Ensure the returned URL carries both params.
-        "if(b&&u.indexOf('X-Bogus=')<0){"
-        "  u+=(u.indexOf('?')>=0?'&':'?')+'X-Bogus='+encodeURIComponent(b);"
-        "  if(g)u+='&X-Gnarly='+encodeURIComponent(g);"
+        "if(!b){"
+        "  /* Fallback: XHR interception (older SDK builds) */"
+        "  var xhr = new XMLHttpRequest();"
+        "  xhr.open('GET'," + qurl + ");"
+        "  xhr.send();"
+        "  var u2 = xhr._url ||" + qurl + ";"
+        "  var h = xhr._headers || {};"
+        "  b = h['X-Bogus'] || '';"
+        "  g = h['X-Gnarly'] || '';"
+        "  if(!b && u2.indexOf('X-Bogus=')>=0){"
+        "    var m = u2.match(/X-Bogus=([^&]*)/); if(m) b = decodeURIComponent(m[1]);"
+        "    var m2 = u2.match(/X-Gnarly=([^&]*)/); if(m2) g = decodeURIComponent(m2[1]);"
+        "  }"
+        "  u = u2;"
+        "}"
+        "if(b && u.indexOf('X-Bogus=')<0){"
+        "  u += (u.indexOf('?')>=0 ? '&' : '?') + 'X-Bogus=' + encodeURIComponent(b);"
+        "  if(g) u += '&X-Gnarly=' + encodeURIComponent(g);"
         "}"
         "return u;"
         "})();";
